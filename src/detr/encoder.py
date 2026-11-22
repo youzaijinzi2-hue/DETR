@@ -52,3 +52,40 @@ class TransformerEncoderLayer(nn.Module):
 
         transformed = self.linear2(self.ffn_dropout(F.relu(self.linear1(tokens))))
         return self.norm2(tokens + self.output_dropout(transformed))
+
+
+class TransformerEncoder(nn.Module):
+    """Encoder層を重ね、Decoderが参照するmemoryを作る。
+
+    デフォルトは6層。層ごとに独立した重みを持ち、位置情報とマスクは
+    全層で共有する。post-norm構成なので、末尾の追加LayerNormは置かない。
+    """
+
+    def __init__(
+        self,
+        d_model: int = 256,
+        nhead: int = 8,
+        dim_feedforward: int = 2048,
+        dropout: float = 0.1,
+        num_layers: int = 6,
+    ) -> None:
+        super().__init__()
+        if num_layers <= 0:
+            raise ValueError("num_layers must be positive")
+        self.layers = nn.ModuleList(
+            TransformerEncoderLayer(d_model, nhead, dim_feedforward, dropout)
+            for _ in range(num_layers)
+        )
+
+    def forward(
+        self, tokens: Tensor, positions: Tensor, padding_mask: Tensor
+    ) -> Tensor:
+        """(B, L, d_model) の系列を同じ形のmemoryに変換する。
+
+        各入力の形とマスクの意味はTransformerEncoderLayerと同じ。
+        パディング位置の出力も残るので、Decoderにもマスクを渡す。
+        """
+        memory = tokens
+        for layer in self.layers:
+            memory = layer(memory, positions, padding_mask)
+        return memory
