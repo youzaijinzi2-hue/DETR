@@ -89,3 +89,48 @@ class TransformerDecoderLayer(nn.Module):
 
         transformed = self.linear2(self.ffn_dropout(F.relu(self.linear1(targets))))
         return self.norm3(targets + self.dropout3(transformed))
+
+
+class TransformerDecoder(nn.Module):
+    """Decoderを6層重ね、各層の候補特徴を返す。
+
+    各層の出力に共有のLayerNormを適用して取り出す（公式実装に対応）。
+    この追加の正規化は読み出し用で、次の層には層本体の出力を渡す。
+    クラス・ボックスの予測と補助損失は、後のステップで実装する。
+    """
+
+    def __init__(
+        self,
+        d_model: int = 256,
+        nhead: int = 8,
+        dim_feedforward: int = 2048,
+        dropout: float = 0.1,
+        num_layers: int = 6,
+    ) -> None:
+        super().__init__()
+        if num_layers <= 0:
+            raise ValueError("num_layers must be positive")
+        self.layers = nn.ModuleList(
+            TransformerDecoderLayer(d_model, nhead, dim_feedforward, dropout)
+            for _ in range(num_layers)
+        )
+        self.norm = nn.LayerNorm(d_model)
+
+    def forward(
+        self,
+        targets: Tensor,
+        query_positions: Tensor,
+        memory: Tensor,
+        positions: Tensor,
+        padding_mask: Tensor,
+    ) -> Tensor:
+        """各層の特徴を(num_layers, B, N, d_model)で返す。
+
+        入力はTransformerDecoderLayerと同じ。最後の層は戻り値[-1]。
+        memory・位置情報・マスクは共有し、targetsだけを層ごとに更新する。
+        """
+        intermediate = []
+        for layer in self.layers:
+            targets = layer(targets, query_positions, memory, positions, padding_mask)
+            intermediate.append(self.norm(targets))
+        return torch.stack(intermediate)
