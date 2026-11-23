@@ -5,7 +5,7 @@ import json
 from pathlib import Path
 
 import torch
-from PIL import Image, ImageDraw
+from PIL import Image
 from torch.utils.data import DataLoader
 from torchvision.transforms import functional as TF
 
@@ -19,11 +19,15 @@ from detr.evaluation import evaluate_model
 from detr.model import DETR
 from detr.postprocess import postprocess
 from detr.preprocessing import prepare_image
+from detr.query_trace import run_trace
+from detr.rendering import draw_predictions
 
 
 def train(args: argparse.Namespace) -> None:
     if args.epochs <= 0 or args.batch_size <= 0:
         raise ValueError("epochs and batch_size must be positive")
+    if args.save_every <= 0:
+        raise ValueError("save-every must be positive")
     torch.manual_seed(args.seed)
     dataset_options = {}
     if args.train_scales is not None:
@@ -55,6 +59,7 @@ def train(args: argparse.Namespace) -> None:
         "num_decoder_layers": args.decoder_layers,
         "pretrained_backbone": args.pretrained_backbone,
         "aux_loss": True,
+        "dropout": args.dropout,
     }
     model = DETR(**config).to(args.device)
     criterion = SetCriterion(dataset.num_classes)
@@ -82,6 +87,8 @@ def train(args: argparse.Namespace) -> None:
             print(record, flush=True)
             log.write(record + "\n")
             log.flush()
+            if epoch % args.save_every != 0 and epoch != args.epochs:
+                continue
             save_checkpoint(
                 output_dir / "checkpoint.pt",
                 model,
@@ -121,14 +128,6 @@ def predict(args: argparse.Namespace) -> None:
             checkpoint["class_names"],
             checkpoint["label_to_category_id"],
         )
-    image = image.resize(
-        (image.width * args.scale, image.height * args.scale), Image.Resampling.NEAREST
-    )
-    drawing = ImageDraw.Draw(image)
-    if ground_truth is not None:
-        for target in ground_truth:
-            coordinates = [coordinate * args.scale for coordinate in target["box_xyxy"]]
-            drawing.rectangle(coordinates, outline="lime", width=3)
     records = []
     for score, label, box in zip(
         result["scores"][: args.top_k],
@@ -138,12 +137,6 @@ def predict(args: argparse.Namespace) -> None:
         label_id = label.item()
         name = checkpoint["class_names"][label_id]
         coordinates = box.tolist()
-        # 描画だけ画像の境界に制限し、JSONには予測座標をそのまま残す。
-        x1, y1, x2, y2 = [coordinate * args.scale for coordinate in coordinates]
-        x1, x2 = [min(max(x, 0), image.width - 1) for x in (x1, x2)]
-        y1, y2 = [min(max(y, 0), image.height - 1) for y in (y1, y2)]
-        drawing.rectangle((x1, y1, x2, y2), outline="red", width=2)
-        drawing.text((x1, y1), f"{name} {score.item():.2f}", fill="red")
         records.append(
             {
                 "label": label_id,
@@ -155,6 +148,7 @@ def predict(args: argparse.Namespace) -> None:
         )
     output = Path(args.output)
     output.parent.mkdir(parents=True, exist_ok=True)
+    image = draw_predictions(image, records, ground_truth, scale=args.scale)
     image.save(output)
     if report is not None:
         report_path = output.with_name(output.stem + ".diagnostics.json")
@@ -214,6 +208,18 @@ def evaluate(args: argparse.Namespace) -> None:
 def main(argv: list[str] | None = None) -> None:
     parser = argparse.ArgumentParser(description="DETRの学習と推論")
     commands = parser.add_subparsers(dest="command", required=True)
+    trace = commands.add_parser("trace-queries")
+    trace.add_argument("--checkpoint", required=True)
+    trace.add_argument("--image-dir", required=True)
+    trace.add_argument("--annotations", required=True)
+    trace.add_argument("--output-dir", default="output/query-trace")
+    trace.add_argument("--steps", type=int, default=100)
+    trace.add_argument("--seed", type=int, default=42)
+    trace.add_argument("--device", default="cpu")
+    trace.add_argument(
+        "--dropout", type=float, help="重みはそのままでDropout率を変更して比較"
+    )
+    trace.set_defaults(run=run_trace)
     demo = commands.add_parser("make-demo-data")
     demo.add_argument("--output-dir", default="data/demo")
     demo.add_argument("--train-count", type=int, default=16)
@@ -225,6 +231,12 @@ def main(argv: list[str] | None = None) -> None:
     training.add_argument("--annotations", required=True)
     training.add_argument("--output-dir", default="output/train")
     training.add_argument("--epochs", type=int, default=1)
+    training.add_argument(
+        "--save-every",
+        type=int,
+        default=1,
+        help="重みの保存間隔（エポック数）。最終エポックは必ず保存",
+    )
     training.add_argument("--batch-size", type=int, default=2)
     training.add_argument("--workers", type=int, default=0)
     training.add_argument("--device", default="cpu")
@@ -242,6 +254,7 @@ def main(argv: list[str] | None = None) -> None:
     training.add_argument("--dim-feedforward", type=int, default=2048)
     training.add_argument("--encoder-layers", type=int, default=6)
     training.add_argument("--decoder-layers", type=int, default=6)
+    training.add_argument("--dropout", type=float, default=0.1)
     training.set_defaults(run=train)
     prediction = commands.add_parser("predict")
     prediction.add_argument("--checkpoint", required=True)

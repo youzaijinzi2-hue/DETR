@@ -87,6 +87,10 @@ MacのMPS対応はこの実装では検証していません。
 
 各エポックで次を保存します。
 
+`--dropout 0`でDropoutを無効にできます（省略時0.1）。
+`--save-every 50`を指定すると重みは50エポックごとと最終エポックに保存します。
+損失ログは保存間隔に関係なく毎エポック記録します。
+
 - `output/train/checkpoint.pt`：最新のモデル、構成、Optimizer状態、クラス対応、前処理設定
 - `output/train/metrics.jsonl`：エポックごとの学習損失。検証精度・mAPではありません
 
@@ -111,6 +115,27 @@ uv run detr predict \
 JSONは空配列になります。NMSは行いません。
 
 ## 検証データでの評価
+
+候補が似た予測を出す理由を調べるには、1枚用の注釈を使って追跡できます。
+
+```bash
+uv run detr trace-queries \
+  --checkpoint output/overfit-one/checkpoint.pt \
+  --image-dir data/demo/train2017 \
+  --annotations data/demo/annotations/instances_one_image.json \
+  --output-dir output/query-trace --steps 100
+```
+
+保存した重み・Optimizer状態から追加で100回更新します。元の保存先は変更しません。
+過去の300エポックを再現する処理ではありません。`query-trace.jsonl`に各更新で実際に
+損失へ使ったマッチング・全候補の確率・Decoder特徴・Object Queriesの勾配ノルムを記録し、
+更新後には同じ画像をDropout無効でも観測します。`query-trace.png`に推移、
+`summary.json`に集計、`checkpoint.pt`に追加学習後の重みを保存します。
+
+同じ重みからDropoutだけを無効にして比較する場合は、`--dropout 0 --seed 42`と
+別の`--output-dir output/query-trace-no-dropout`を指定します。
+通常のDropoutとMultiheadAttention内部のDropoutの両方が変更され、変更後の設定も
+新しいチェックポイントに保存されます。省略時は元の設定を維持します。
 
 1枚の正解と予測を比較する場合は、推論に注釈JSONを渡せます。
 

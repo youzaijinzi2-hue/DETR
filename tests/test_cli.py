@@ -57,6 +57,10 @@ def test_training_saves_reloadable_checkpoint_and_predicts_annotated_image(tmp_p
             "1",
             "--decoder-layers",
             "2",
+            "--dropout",
+            "0",
+            "--save-every",
+            "50",
         ]
     )
 
@@ -64,6 +68,7 @@ def test_training_saves_reloadable_checkpoint_and_predicts_annotated_image(tmp_p
     model, checkpoint = load_model(checkpoint_path)
     assert not model.training
     assert checkpoint["epoch"] == 1
+    assert checkpoint["model_config"]["dropout"] == 0
     assert checkpoint["class_names"] == ["rectangle"]
     assert checkpoint["label_to_category_id"] == {0: 42}
     assert checkpoint["optimizer"]["state"]
@@ -90,7 +95,8 @@ def test_training_saves_reloadable_checkpoint_and_predicts_annotated_image(tmp_p
     )
 
     with Image.open(prediction_path) as result:
-        assert result.size == (64, 32)
+        assert result.width > 64
+        assert result.height >= 32
         assert result.tobytes() != image.tobytes()
     records = json.loads(prediction_path.with_suffix(".json").read_text())
     assert len(records) == 3
@@ -119,9 +125,10 @@ def test_training_saves_reloadable_checkpoint_and_predicts_annotated_image(tmp_p
         ]
     )
     with Image.open(comparison_path) as comparison:
-        assert comparison.size == (192, 96)
+        assert comparison.width > 192
+        assert comparison.height >= 96
         assert any(
-            comparison.getpixel((x, y)) == (0, 255, 0)
+            comparison.getpixel((x, y)) == (0, 130, 60)
             for x in range(comparison.width)
             for y in range(comparison.height)
         )
