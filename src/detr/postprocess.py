@@ -32,6 +32,11 @@ def postprocess(
         indices = torch.where(score >= threshold)[0]
         indices = indices[score[indices].argsort(descending=True)]
         results.append(
-            {"scores": score[indices], "labels": label[indices], "boxes": box[indices]}
+            {
+                "scores": score[indices],
+                "labels": label[indices],
+                "boxes": box[indices],
+                "query_indices": indices,
+            }
         )
     return results

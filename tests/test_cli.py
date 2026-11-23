@@ -97,3 +97,38 @@ def test_training_saves_reloadable_checkpoint_and_predicts_annotated_image(tmp_p
     assert all(record["class_name"] == "rectangle" for record in records)
     assert all(record["category_id"] == 42 for record in records)
     assert all(len(record["box_xyxy"]) == 4 for record in records)
+
+    comparison_path = tmp_path / "comparison.png"
+    main(
+        [
+            "predict",
+            "--checkpoint",
+            str(checkpoint_path),
+            "--image",
+            str(image_path),
+            "--output",
+            str(comparison_path),
+            "--threshold",
+            "0",
+            "--top-k",
+            "1",
+            "--scale",
+            "3",
+            "--annotations",
+            str(annotation_path),
+        ]
+    )
+    with Image.open(comparison_path) as comparison:
+        assert comparison.size == (192, 96)
+        assert any(
+            comparison.getpixel((x, y)) == (0, 255, 0)
+            for x in range(comparison.width)
+            for y in range(comparison.height)
+        )
+    assert len(json.loads(comparison_path.with_suffix(".json").read_text())) == 1
+    report = json.loads(
+        comparison_path.with_name("comparison.diagnostics.json").read_text()
+    )
+    assert len(report["ground_truth"]) == 1
+    assert len(report["queries"]) == 3
+    assert all(0 <= query["best_same_class_gt_iou"] <= 1 for query in report["queries"])

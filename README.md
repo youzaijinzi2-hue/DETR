@@ -12,6 +12,37 @@ uv run pytest -q
 
 COCO形式の画像と正解JSONを用意します。データは自動ダウンロードしません。
 
+まず動作確認する場合は、図形画像の小さなデータセットを生成できます。
+
+```bash
+uv run detr make-demo-data
+```
+
+`data/demo/train2017`に16枚、`data/demo/val2017`に4枚の画像と、
+`data/demo/annotations/instances_train2017.json`・`instances_val2017.json`を作ります。
+赤い四角と青い楕円の2クラスで、写真の検出精度を評価するデータではありません。
+既存ファイルがある出力先には上書きしません。
+
+ダウンロードなしで学習・推論を試す例（小さい構成、1エポックの動作確認）：
+
+```bash
+uv run detr train \
+  --image-dir data/demo/train2017 \
+  --annotations data/demo/annotations/instances_train2017.json \
+  --output-dir output/demo --epochs 1 --batch-size 2 \
+  --short-side 64 --max-size 96 --no-augmentation \
+  --d-model 32 --nhead 4 --dim-feedforward 64 \
+  --encoder-layers 1 --decoder-layers 2 --num-queries 10
+
+uv run detr predict \
+  --checkpoint output/demo/checkpoint.pt \
+  --image data/demo/val2017/000001.png \
+  --output output/demo/prediction.png --threshold 0.1
+```
+
+1エポックで正確に検出できるとは限りません。閾値を下げて描画されるボックスも、
+動作確認用の予測です。
+
 ```text
 data/coco/
   train2017/                # 画像
@@ -60,7 +91,7 @@ MacのMPS対応はこの実装では検証していません。
 - `output/train/metrics.jsonl`：エポックごとの学習損失。検証精度・mAPではありません
 
 現在は単一プロセスでの基本的な学習です。学習率スケジュール、学習再開CLI、
-検証・COCO AP、ランダムクロップは未実装で、論文の学習設定の完全再現ではありません。
+ランダムクロップは未実装で、論文の学習設定の完全再現ではありません。
 同じ出力先で再実行すると既存のログとチェックポイントを置き換えます。
 
 ## 推論と描画
@@ -78,3 +109,40 @@ uv run detr predict \
 同名のJSONを保存します。JSONの`box_xyxy`は元画像上のピクセル座標で、画像外の値も
 取り得ます。描画時だけ境界内に制限します。閾値以上の予測がなければ、画像はそのままで
 JSONは空配列になります。NMSは行いません。
+
+## 検証データでの評価
+
+1枚の正解と予測を比較する場合は、推論に注釈JSONを渡せます。
+
+```bash
+uv run detr predict \
+  --checkpoint output/overfit-one/checkpoint.pt \
+  --image data/demo/train2017/000003.png \
+  --annotations data/demo/annotations/instances_one_image.json \
+  --output output/overfit-one/comparison.png \
+  --threshold 0.1 --top-k 1 --scale 6
+```
+
+正解枠は緑、予測枠は赤で描きます。`--scale`は描画だけの拡大です。
+`--top-k`は描画と通常の予測JSONだけを絞り込みます。
+`comparison.diagnostics.json`には、閾値・top-kに関係なく全候補について、
+元のquery番号、クラス確率、no-object確率、同クラスの正解との最大IoUを保存します。
+最大IoUは候補ごとの比較で、一対一マッチングやAPを表すものではありません。
+同クラスの正解がない場合はIoUがnullです。
+注釈内に同名ファイルが複数ある場合は`--image-id`も指定してください。
+
+```bash
+uv run detr evaluate \
+  --checkpoint output/demo/checkpoint.pt \
+  --image-dir data/demo/val2017 \
+  --annotations data/demo/annotations/instances_val2017.json \
+  --output output/demo/evaluation.json
+```
+
+保存された前処理を使い、ランダム拡張・勾配計算・重み更新なしで検証損失と
+pycocotoolsの標準bbox評価を計算します。学習時と同じカテゴリ一覧が必要です。
+APはIoU 0.50〜0.95の平均、AP50/AP75はそれぞれIoU 0.50/0.75でのAP、
+AR100は画像あたり最大100検出での平均再現率です。数値は0〜1で、高いほど良い指標です。
+正解がなく定義できない指標はCOCO仕様の-1になります。
+AP評価ではスコア閾値で予測を事前除去しません。合成データでの評価は、写真に対する
+検出性能を示すものではありません。

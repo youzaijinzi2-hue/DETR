@@ -12,7 +12,10 @@ from torchvision.transforms import functional as TF
 from detr.checkpoint import load_model, save_checkpoint
 from detr.criterion import SetCriterion
 from detr.dataset import CocoDetectionDataset
+from detr.demo_data import make_demo_data
+from detr.diagnostics import prediction_diagnostics, read_ground_truth
 from detr.engine import collate_fn, train_one_epoch
+from detr.evaluation import evaluate_model
 from detr.model import DETR
 from detr.postprocess import postprocess
 from detr.preprocessing import prepare_image
@@ -95,6 +98,8 @@ def train(args: argparse.Namespace) -> None:
 
 
 def predict(args: argparse.Namespace) -> None:
+    if args.scale <= 0 or (args.top_k is not None and args.top_k <= 0):
+        raise ValueError("scale and top-k must be positive")
     model, checkpoint = load_model(args.checkpoint, args.device)
     with Image.open(args.image) as source:
         image = source.convert("RGB")
@@ -105,14 +110,36 @@ def predict(args: argparse.Namespace) -> None:
         outputs, torch.tensor([[image.height, image.width]]), threshold=args.threshold
     )[0]
     result = {key: value.cpu() for key, value in result.items()}
+    ground_truth = None
+    report = None
+    if args.annotations:
+        ground_truth = read_ground_truth(args.annotations, args.image, args.image_id)
+        report = prediction_diagnostics(
+            outputs,
+            (image.height, image.width),
+            ground_truth,
+            checkpoint["class_names"],
+            checkpoint["label_to_category_id"],
+        )
+    image = image.resize(
+        (image.width * args.scale, image.height * args.scale), Image.Resampling.NEAREST
+    )
     drawing = ImageDraw.Draw(image)
+    if ground_truth is not None:
+        for target in ground_truth:
+            coordinates = [coordinate * args.scale for coordinate in target["box_xyxy"]]
+            drawing.rectangle(coordinates, outline="lime", width=3)
     records = []
-    for score, label, box in zip(result["scores"], result["labels"], result["boxes"]):
+    for score, label, box in zip(
+        result["scores"][: args.top_k],
+        result["labels"][: args.top_k],
+        result["boxes"][: args.top_k],
+    ):
         label_id = label.item()
         name = checkpoint["class_names"][label_id]
         coordinates = box.tolist()
         # 描画だけ画像の境界に制限し、JSONには予測座標をそのまま残す。
-        x1, y1, x2, y2 = coordinates
+        x1, y1, x2, y2 = [coordinate * args.scale for coordinate in coordinates]
         x1, x2 = [min(max(x, 0), image.width - 1) for x in (x1, x2)]
         y1, y2 = [min(max(y, 0), image.height - 1) for y in (y1, y2)]
         drawing.rectangle((x1, y1, x2, y2), outline="red", width=2)
@@ -129,15 +156,70 @@ def predict(args: argparse.Namespace) -> None:
     output = Path(args.output)
     output.parent.mkdir(parents=True, exist_ok=True)
     image.save(output)
+    if report is not None:
+        report_path = output.with_name(output.stem + ".diagnostics.json")
+        report_path.write_text(
+            json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8"
+        )
+        print(
+            f"Saved ground truth (green), predictions (red), and diagnostics to {report_path}"
+        )
     output.with_suffix(".json").write_text(
         json.dumps(records, ensure_ascii=False, indent=2), encoding="utf-8"
     )
     print(f"Saved {len(records)} predictions to {output}")
 
 
+def demo_data(args: argparse.Namespace) -> None:
+    root = make_demo_data(
+        args.output_dir,
+        train_count=args.train_count,
+        val_count=args.val_count,
+        seed=args.seed,
+    )
+    print(f"Created demo data at {root}")
+
+
+def evaluate(args: argparse.Namespace) -> None:
+    model, checkpoint = load_model(args.checkpoint, args.device)
+    dataset = CocoDetectionDataset(
+        args.image_dir, args.annotations, training=False, **checkpoint["preprocessing"]
+    )
+    if (
+        dataset.label_to_category_id != checkpoint["label_to_category_id"]
+        or dataset.class_names != checkpoint["class_names"]
+    ):
+        raise ValueError("evaluation categories must match checkpoint categories")
+    loader = DataLoader(
+        dataset,
+        batch_size=args.batch_size,
+        shuffle=False,
+        collate_fn=collate_fn,
+        num_workers=args.workers,
+    )
+    metrics = evaluate_model(
+        model,
+        SetCriterion(dataset.num_classes),
+        loader,
+        annotation_file=args.annotations,
+        label_to_category_id=dataset.label_to_category_id,
+    )
+    output = Path(args.output)
+    output.parent.mkdir(parents=True, exist_ok=True)
+    record = json.dumps(metrics, indent=2, allow_nan=False)
+    output.write_text(record, encoding="utf-8")
+    print(record)
+
+
 def main(argv: list[str] | None = None) -> None:
     parser = argparse.ArgumentParser(description="DETRの学習と推論")
     commands = parser.add_subparsers(dest="command", required=True)
+    demo = commands.add_parser("make-demo-data")
+    demo.add_argument("--output-dir", default="data/demo")
+    demo.add_argument("--train-count", type=int, default=16)
+    demo.add_argument("--val-count", type=int, default=4)
+    demo.add_argument("--seed", type=int, default=42)
+    demo.set_defaults(run=demo_data)
     training = commands.add_parser("train")
     training.add_argument("--image-dir", required=True)
     training.add_argument("--annotations", required=True)
@@ -167,7 +249,26 @@ def main(argv: list[str] | None = None) -> None:
     prediction.add_argument("--output", default="output/prediction.png")
     prediction.add_argument("--threshold", type=float, default=0.5)
     prediction.add_argument("--device", default="cpu")
+    prediction.add_argument(
+        "--annotations", help="正解を緑で描画し、IoU・全候補の確率を保存"
+    )
+    prediction.add_argument(
+        "--image-id", type=int, help="注釈内でファイル名が重複する場合に指定"
+    )
+    prediction.add_argument("--scale", type=int, default=1, help="描画画像の拡大倍率")
+    prediction.add_argument(
+        "--top-k", type=int, help="描画・予測JSONを上位k候補に限定（診断は全候補）"
+    )
     prediction.set_defaults(run=predict)
+    evaluation = commands.add_parser("evaluate")
+    evaluation.add_argument("--checkpoint", required=True)
+    evaluation.add_argument("--image-dir", required=True)
+    evaluation.add_argument("--annotations", required=True)
+    evaluation.add_argument("--output", default="output/evaluation.json")
+    evaluation.add_argument("--batch-size", type=int, default=2)
+    evaluation.add_argument("--workers", type=int, default=0)
+    evaluation.add_argument("--device", default="cpu")
+    evaluation.set_defaults(run=evaluate)
     args = parser.parse_args(argv)
     args.run(args)
 
