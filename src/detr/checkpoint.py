@@ -18,8 +18,9 @@ def save_checkpoint(
     label_to_category_id: dict[int, int],
     preprocessing: dict[str, int],
     epoch: int,
+    best_ap: float | None = None,
 ) -> None:
-    """optimizer状態も保存する。CLIでの学習再開はまだ提供しない。"""
+    """学習再開に必要なOptimizer状態と乱数状態も保存する。"""
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     # 保存中断で既存のcheckpointを壊さないよう、保存後に置き換える。
@@ -33,6 +34,8 @@ def save_checkpoint(
             "label_to_category_id": label_to_category_id,
             "preprocessing": preprocessing,
             "epoch": epoch,
+            "best_ap": best_ap,
+            "rng_state": torch.get_rng_state(),
         },
         temporary,
     )

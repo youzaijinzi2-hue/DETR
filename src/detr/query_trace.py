@@ -92,6 +92,22 @@ def describe_queries(outputs, captured, indices, targets):
     }
 
 
+@torch.no_grad()
+def query_snapshot(model, criterion, image, target):
+    """固定画像を学習更新なしで観測し、候補特徴・確率・対応先を返す。"""
+    was_training = model.training
+    device = next(model.parameters()).device
+    targets = [{key: value.to(device) for key, value in target.items()}]
+    model.eval()
+    try:
+        outputs, captured = _observe(model, [image.to(device)])
+        return describe_queries(
+            outputs, captured, criterion.matcher(outputs, targets), targets
+        )
+    finally:
+        model.train(was_training)
+
+
 def trace_queries(
     model, criterion, optimizer, image, target, *, steps: int, output_file: str | Path
 ):

@@ -1,5 +1,6 @@
 import json
 
+import pytest
 import torch
 from PIL import Image, ImageDraw
 
@@ -139,3 +140,73 @@ def test_training_saves_reloadable_checkpoint_and_predicts_annotated_image(tmp_p
     assert len(report["ground_truth"]) == 1
     assert len(report["queries"]) == 3
     assert all(0 <= query["best_same_class_gt_iou"] <= 1 for query in report["queries"])
+
+    resumed_dir = tmp_path / "resumed"
+    main(
+        [
+            "train",
+            "--resume",
+            str(checkpoint_path),
+            "--epochs",
+            "2",
+            "--image-dir",
+            str(tmp_path),
+            "--annotations",
+            str(annotation_path),
+            "--output-dir",
+            str(resumed_dir),
+            "--batch-size",
+            "1",
+            "--no-augmentation",
+            "--val-image-dir",
+            str(tmp_path),
+            "--val-annotations",
+            str(annotation_path),
+            "--eval-every",
+            "1",
+            "--save-every",
+            "50",
+            "--lr",
+            "0.1",
+        ]
+    )
+    resumed = torch.load(resumed_dir / "checkpoint.pt", weights_only=True)
+    assert resumed["epoch"] == 2
+    assert resumed["model_config"] == checkpoint["model_config"]
+    assert (
+        resumed["optimizer"]["param_groups"][0]["lr"]
+        == checkpoint["optimizer"]["param_groups"][0]["lr"]
+    )
+    for key, state in checkpoint["optimizer"]["state"].items():
+        torch.testing.assert_close(
+            resumed["optimizer"]["state"][key]["step"], state["step"] + 1
+        )
+    assert "rng_state" in resumed
+    assert (resumed_dir / "best.pt").exists()
+    validation_rows = [
+        json.loads(line)
+        for line in (resumed_dir / "validation.jsonl").read_text().splitlines()
+    ]
+    assert [row["epoch"] for row in validation_rows] == [1, 2]
+    probes = [
+        json.loads(line)
+        for line in (resumed_dir / "query-probe.jsonl").read_text().splitlines()
+    ]
+    assert [row["epoch"] for row in probes] == [1, 2]
+    assert all(len(row["queries"]) == 3 for row in probes)
+    assert json.loads((resumed_dir / "metrics.jsonl").read_text())["epoch"] == 2
+    assert torch.load(checkpoint_path, weights_only=True)["epoch"] == 1
+    with pytest.raises(ValueError, match="epochs must exceed checkpoint"):
+        main(
+            [
+                "train",
+                "--resume",
+                str(checkpoint_path),
+                "--epochs",
+                "1",
+                "--image-dir",
+                str(tmp_path),
+                "--annotations",
+                str(annotation_path),
+            ]
+        )

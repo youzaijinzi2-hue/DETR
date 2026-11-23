@@ -94,9 +94,49 @@ MacのMPS対応はこの実装では検証していません。
 - `output/train/checkpoint.pt`：最新のモデル、構成、Optimizer状態、クラス対応、前処理設定
 - `output/train/metrics.jsonl`：エポックごとの学習損失。検証精度・mAPではありません
 
-現在は単一プロセスでの基本的な学習です。学習率スケジュール、学習再開CLI、
+現在は単一プロセスでの基本的な学習です。学習率スケジュール、
 ランダムクロップは未実装で、論文の学習設定の完全再現ではありません。
 同じ出力先で再実行すると既存のログとチェックポイントを置き換えます。
+
+### 学習再開と定期検証
+
+保存済みログからグラフだけを作る場合（再学習は行いません）：
+
+```bash
+uv run detr plot-training \
+  --log-dirs output/demo-500-resumed output/demo-500-resumed-90 \
+  --output output/demo-500-resumed-90/progress.png
+```
+
+`metrics.jsonl`、`validation.jsonl`、`query-probe.jsonl`を読み、エポック順に結合します。
+重複するエポックは後に指定したフォルダを優先します。ないログのパネルは未記録と表示します。
+
+```bash
+uv run detr train \
+  --resume output/demo-500-stable/checkpoint.pt \
+  --image-dir data/demo-500/train2017 \
+  --annotations data/demo-500/annotations/instances_train2017.json \
+  --output-dir output/demo-500-resumed \
+  --epochs 60 --batch-size 8 --train-scales 48 64 80 \
+  --val-image-dir data/demo-500/val2017 \
+  --val-annotations data/demo-500/annotations/instances_val2017.json \
+  --eval-every 5 --save-every 5 --seed 42
+```
+
+`--epochs`は追加回数ではなく最終エポック番号です。30から60なら30回追加します。
+再開時はモデル構成（Dropoutを含む）・前処理・Optimizer状態と学習率を復元するため、
+モデル構成・学習率のCLIオプションは使いません。バッチサイズ・学習用拡張設定は
+コマンドで指定してください。新しいチェックポイントにはCPUのtorch乱数状態も保存します。
+古いチェックポイントには乱数状態がないため、途切れない実行との完全一致は保証しません。
+
+`metrics.jsonl`に学習損失、`validation.jsonl`に再開前および一定間隔・最終回の検証損失とAPを
+記録します。`best.pt`はこの出力先で観測した最高検証APの重み、`checkpoint.pt`は最新の重みです。
+同じ出力先で再開する場合、学習ログ末尾とチェックポイントのエポックが一致する必要があります。
+新しい出力先に再開すれば、元のログと重みを残せます。
+
+各検証時には同じ検証画像（ID昇順の先頭）を学習更新なしで観測し、
+`query-probe.jsonl`へ各候補の特徴・全クラス確率・正解とのマッチング先を保存します。
+`trace-queries`と違い、診断のためにその1枚だけで追加学習することはありません。
 
 ## 推論と描画
 
