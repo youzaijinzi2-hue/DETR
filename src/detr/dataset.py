@@ -2,6 +2,7 @@
 
 import json
 from collections import defaultdict
+from collections.abc import Sequence
 from pathlib import Path
 
 import torch
@@ -10,6 +11,7 @@ from torch import Tensor
 from torch.utils.data import Dataset
 from torchvision.transforms import functional as TF
 
+from detr.augmentation import horizontal_flip
 from detr.boxes import normalize_boxes_xyxy
 
 
@@ -19,7 +21,8 @@ class CocoDetectionDataset(Dataset):
     物体検出のみを対象に、iscrowdの注釈と面積ゼロのボックスを除外する。
     category_idは昇順で0始まりに詰め直す（公式コードのID保持とは異なる）。
     学習・検証のJSONには同じcategories一覧が必要。
-    固定サイズへのリサイズと標準化を行う基本版。ランダム拡張は未実装。
+    training=Trueならランダム左右反転とマルチスケールリサイズを行う。
+    training=Falseではshort_sideへの固定リサイズ。ランダムcropは未実装。
     """
 
     def __init__(
@@ -29,9 +32,31 @@ class CocoDetectionDataset(Dataset):
         *,
         short_side: int = 800,
         max_size: int = 1333,
+        training: bool = False,
+        train_scales: Sequence[int] = (
+            480,
+            512,
+            544,
+            576,
+            608,
+            640,
+            672,
+            704,
+            736,
+            768,
+            800,
+        ),
+        flip_probability: float = 0.5,
     ) -> None:
         if short_side <= 0 or max_size <= 0:
             raise ValueError("short_side and max_size must be positive")
+        if not train_scales or any(size <= 0 for size in train_scales):
+            raise ValueError("train_scales must contain positive sizes")
+        if not 0 <= flip_probability <= 1:
+            raise ValueError("flip_probability must be between 0 and 1")
+        self.training = training
+        self.train_scales = tuple(train_scales)
+        self.flip_probability = flip_probability
         self.image_dir = Path(image_dir)
         self.short_side = short_side
         self.max_size = max_size
@@ -90,9 +115,15 @@ class CocoDetectionDataset(Dataset):
         boxes = normalize_boxes_xyxy(boxes[valid], (height, width))
         labels = labels[valid]
 
-        scale = min(
-            self.short_side / min(height, width), self.max_size / max(height, width)
-        )
+        short_side = self.short_side
+        if self.training:
+            if torch.rand(()).item() < self.flip_probability:
+                image, boxes = horizontal_flip(image, boxes)
+            # 各読み込みで短辺サイズを選ぶ。torch.manual_seedで再現できる。
+            scale_index = torch.randint(len(self.train_scales), ()).item()
+            short_side = self.train_scales[scale_index]
+
+        scale = min(short_side / min(height, width), self.max_size / max(height, width))
         new_height = max(1, round(height * scale))
         new_width = max(1, round(width * scale))
         image = TF.resize(image, [new_height, new_width], antialias=True)
