@@ -13,6 +13,7 @@ from torchvision.transforms import functional as TF
 
 from detr.augmentation import horizontal_flip
 from detr.boxes import normalize_boxes_xyxy
+from detr.preprocessing import prepare_image
 
 
 class CocoDetectionDataset(Dataset):
@@ -123,14 +124,8 @@ class CocoDetectionDataset(Dataset):
             scale_index = torch.randint(len(self.train_scales), ()).item()
             short_side = self.train_scales[scale_index]
 
-        scale = min(short_side / min(height, width), self.max_size / max(height, width))
-        new_height = max(1, round(height * scale))
-        new_width = max(1, round(width * scale))
-        image = TF.resize(image, [new_height, new_width], antialias=True)
-        image = image.float() / 255
-        image = TF.normalize(
-            image, mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]
-        )
+        image = prepare_image(image, short_side, self.max_size)
+        new_height, new_width = image.shape[-2:]
         # 画像全体のリサイズでは、正規化したボックスの値は変わらない。
         target = {
             "labels": labels,
